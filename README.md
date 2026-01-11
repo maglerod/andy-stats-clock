@@ -14,6 +14,7 @@ This is not just a clock — it’s an interactive, animated, data-driven radial
 
 
 🌟 Key Features
+
 ✔ Unlimited rings (Layers)
 Each ring can be configured independently with:
  * Entity selection
