@@ -1428,7 +1428,7 @@ _renderHourLabelsSvg(cfg, r) {
         const minutes = now.getMinutes() + now.getSeconds() / 60;
         const t = minutes / 60; // 0..1 över timmen
 
-        const geom = this._getClockGeometry(cfg);
+        const geom = this._getClockGeometryLabels(cfg);
         const span = geom.span;
         const angle = geom.start + span * t;
 
