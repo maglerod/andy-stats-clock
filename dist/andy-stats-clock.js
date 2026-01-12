@@ -1,7 +1,7 @@
 (() => {
 /**
  * Andy Stats Clock
- * v1.0.0
+ * v1.0.1
  * ------------------------------------------------------------------
  * Developed by: Andreas ("AndyBonde") with some help from AI :).
  *
@@ -18,12 +18,13 @@
  *
  *
  */
+(() => {
 
   const CARD_TAG = "andy-stats-clock";
   const EDITOR_TAG = "andy-stats-clock-editor";
 
   console.info(
-    `%c Andy Stats Clock %c v1.0.0 loaded `,
+    `%c Andy Stats Clock %c v1.0.1 loaded Development `,
     "color: white; background: #4A148C; padding: 4px 8px; border-radius: 4px 0 0 4px;",
     "color: white; background: #6A1B9A; padding: 4px 8px; border-radius: 0 4px 4px 0;"
   );
@@ -771,6 +772,7 @@ _buildLayerData(cfg, hass) {
     let maxIndex = -1;
 
     values.forEach((v, i) => {
+      if (v == null) return;
       const num = Number(v);
       if (isNaN(num)) return;
       if (min === null || num < min) {
@@ -980,14 +982,15 @@ _buildLayerData(cfg, hass) {
 
       _renderOuterTicksSvg(cfg, rOuter) {
         const ticks = 60;
-        const span = cfg.end_angle - cfg.start_angle || 360;
+        const span = 360; //cfg.end_angle - cfg.start_angle || 360;
         let out = "";
         const baseColor = "rgba(255,255,255,0.35)";
         for (let i = 0; i < ticks; i++) {
           const isBig = i % 5 === 0;
           const len = isBig ? 2.5 : 1.5;
           const width = isBig ? 0.7 : 0.4;
-          const angle = cfg.start_angle + (span * i) / ticks;
+          //const angle = cfg.start_angle + (span * i) / ticks;
+          const angle = 0 + (span * i) / ticks;
           const p1 = polarToCartesian(rOuter - len, angle);
           const p2 = polarToCartesian(rOuter, angle);
           out += `
@@ -1005,8 +1008,84 @@ _buildLayerData(cfg, hass) {
         return out;
       }
 
-      // ---- svg rendering ----
+  _getClockGeometry(cfg) {
+  const mode = cfg.clock_mode || "24h";
 
+//  const startCfg =
+//    typeof cfg.start_angle === "number" ? cfg.start_angle : -7.5;
+//  const endCfg =
+//    typeof cfg.end_angle === "number" ? cfg.end_angle : 352.5;
+  const startCfg = 0;
+  const endCfg = 360;
+
+  let span = 360; //endCfg - startCfg;
+  if (!span) span = 360;
+
+  if (mode === "12h") {
+    // Default-vinklarna är gjorda för 24 segment.
+    // För 12h måste vi rotera ca ett halvt 24h-segment (7.5°)
+    // så att 12/6 hamnar exakt upp/ner.
+    const step12 = span / 12;
+    const step24 = span / 24;
+    const rotationFix = step12 / 2 - step24 / 2; // ≈ 7.5°
+    const adjustedStart = 0; //startCfg - rotationFix;
+
+    return {
+      mode,
+      hours: 12,
+      start: adjustedStart,
+      span,
+    };
+  }
+
+  return {
+    mode,
+    hours: 24,
+    start: startCfg,
+    span,
+  };
+}
+
+_getClockGeometryLabels(cfg) {
+  const mode = cfg.clock_mode || "24h";
+
+  const startCfg =
+    typeof cfg.start_angle === "number" ? cfg.start_angle : -7.5;
+  const endCfg =
+    typeof cfg.end_angle === "number" ? cfg.end_angle : 352.5;
+
+  let span = endCfg - startCfg;
+  if (!span) span = 360;
+
+  if (mode === "12h") {
+    // Default-vinklarna är gjorda för 24 segment.
+    // För 12h måste vi rotera ca ett halvt 24h-segment (7.5°)
+    // så att 12/6 hamnar exakt upp/ner.
+    const step12 = span / 12;
+    const step24 = span / 24;
+    const rotationFix = step12 / 2 - step24 / 2; // ≈ 7.5°
+    const adjustedStart = startCfg - rotationFix;
+
+    return {
+      mode,
+      hours: 12,
+      start: adjustedStart,
+      span,
+    };
+  }
+
+  return {
+    mode,
+    hours: 24,
+    start: startCfg,
+    span,
+  };
+}
+
+      // ---- svg rendering ----
+  
+  
+            // ---- svg rendering ----
       _renderLayerSvg(cfg, layer) {
         const {
           values,
@@ -1022,19 +1101,27 @@ _buildLayerData(cfg, hass) {
           avg,
           segmentCount,
         } = layer;
+
         const n = values.length;
         if (!n) return "";
-        const span = cfg.end_angle - cfg.start_angle;
+
+        const geom = this._getClockGeometry(cfg);
+        const span = geom.span;
         const segments = segmentCount || n;
         const step = span / segments;
+        const baseStart = 0; //geom.start;
+
         let segs = "";
 
         for (let i = 0; i < n; i++) {
-          const v = values[i];
-          if (v == null || isNaN(Number(v))) continue; // no data -> no color
-          const val = Number(v);
-          const angleStart = cfg.start_angle + step * i;
-          const angleEnd = cfg.start_angle + step * (i + 1);
+          const raw = values[i];
+
+          // Viktigt: saknas data (null / NaN) -> inget segment ritas
+          if (raw == null || isNaN(Number(raw))) continue;
+
+          const val = Number(raw);
+          const angleStart = baseStart + step * i;
+          const angleEnd = baseStart + step * (i + 1);
 
           let color = "#28c76f";
           if (lc.color_mode === "gradient") {
@@ -1071,6 +1158,7 @@ _buildLayerData(cfg, hass) {
           `;
         }
 
+        // Stats badges (min / max / avg)
         const markersCfg = lc.stats_markers || {};
         let markersSvg = "";
         const markerColor = markersCfg.color || "rgba(255,255,255,0.9)";
@@ -1078,6 +1166,7 @@ _buildLayerData(cfg, hass) {
           markersCfg.decimals !== undefined && markersCfg.decimals !== null
             ? Number(markersCfg.decimals)
             : 1;
+
         const radiusOffset = markersCfg.radius_offset;
         const fontSize = markersCfg.font_size;
         const minLabel = markersCfg.min_label ?? "";
@@ -1133,7 +1222,10 @@ _buildLayerData(cfg, hass) {
         return segs + markersSvg;
       }
 
-      _renderStatsMarker(
+      
+
+
+    _renderStatsMarker(
         cfg,
         layer,
         idx,
@@ -1148,10 +1240,12 @@ _buildLayerData(cfg, hass) {
       ) {
         const n = layer.values.length;
         if (!n) return "";
-        const span = cfg.end_angle - cfg.start_angle;
+
+        const geom = this._getClockGeometry(cfg);
+        const span = geom.span;
         const segments = layer.segmentCount || n;
         const step = span / segments;
-        const angleCenter = cfg.start_angle + step * (idx + 0.5);
+        const angleCenter = geom.start + step * (idx + 0.5);
 
         const offset = radiusOffset != null ? Number(radiusOffset) : 2;
         const rDot = layer.rOuter + offset;
@@ -1171,8 +1265,8 @@ _buildLayerData(cfg, hass) {
         if (unit) valStr += unit;
 
         let textStr = valStr;
-        if (label && label.trim() !== "") {
-          textStr = `${label.trim()} ${valStr}`;
+        if (label && String(label).trim() !== "") {
+          textStr = `${String(label).trim()} ${valStr}`;
         }
 
         const size = fontSize != null ? Number(fontSize) : 3;
@@ -1197,7 +1291,49 @@ _buildLayerData(cfg, hass) {
         `;
       }
 
-      _renderHourLabelsSvg(cfg, r) {
+
+      
+
+_renderHourLabelsSvg(cfg, r) {
+  const geom = this._getClockGeometryLabels(cfg);
+  const mode = geom.mode;
+  const hours = geom.hours;
+  const span = geom.span;
+  const step = span / hours;
+
+  let out = "";
+
+  for (let i = 0; i < hours; i++) {
+    const angleCenter = geom.start + step * (i + 0.5);
+    const p = polarToCartesian(r, angleCenter);
+
+    let label;
+    if (mode === "12h") {
+      // 0..11 -> 12,1,2,...,11
+      label = i === 0 ? 12 : i;
+    } else {
+      label = i;
+    }
+
+    out += `
+      <text
+        x="${p.x}"
+        y="${p.y + 2}"
+        text-anchor="middle"
+        alignment-baseline="middle"
+        font-size="4"
+        fill="rgba(255,255,255,0.7)"
+      >
+        ${label}
+      </text>
+    `;
+  }
+
+  return out;
+}
+
+      
+      _renderHourLabelsSvgOld(cfg, r) {
         const mode = cfg.clock_mode || "24h";
         let out = "";
 
@@ -1251,65 +1387,65 @@ _buildLayerData(cfg, hass) {
       }
 
       // --------- Hour / Minute / Second sweepers ---------
-
       _buildHourSweeper(cfg, hass) {
         const sw = cfg.hour_sweeper || cfg.sweeper || {};
-        if (!sw.enabled) return null;
+        if (sw.enabled === false) return null;
 
-        const clockMode = cfg.clock_mode || "24h";
+        const geom = this._getClockGeometry(cfg);
+        const totalHours = geom.hours;
+
         let hourFraction = 0;
 
-        if (sw.use_system_time) {
-          const now = new Date();
-          hourFraction = now.getHours() + now.getMinutes() / 60;
-        } else if (sw.entity) {
-          const st = getEntityState(hass, sw.entity);
-          if (st && !isNaN(Number(st.state))) hourFraction = Number(st.state);
-        }
+        const now = new Date();
+        hourFraction = now.getHours() + now.getMinutes() / 60;
+        
 
-        let totalHours = 24;
-        if (clockMode === "12h") {
+        if (geom.mode === "12h") {
           hourFraction = ((hourFraction % 12) + 12) % 12;
-          totalHours = 12;
+        } else {
+          hourFraction = ((hourFraction % 24) + 24) % 24;
         }
 
-        const t =
-          ((hourFraction % totalHours) + totalHours) % totalHours / totalHours;
-
-        const span = cfg.end_angle - cfg.start_angle || 360;
+        const t = hourFraction / totalHours;
+        const span = geom.span;
         const step = span / totalHours;
-        const angle = cfg.start_angle + span * t + step / 2;
+        const angle = geom.start + span * t + step / 2;
 
         return {
           angle,
           color: sw.color || "#FFFFFF",
           width: sw.width || 1.5,
-          opacity: sw.opacity ?? 1,
+          opacity: sw.opacity != null ? sw.opacity : 1,
+          show_dash: sw.show_dash !== false,
+          dash_radius: sw.dash_radius != null ? Number(sw.dash_radius) : 1.3,
         };
       }
 
       _buildMinuteSweeper(cfg) {
         const ms = cfg.minute_sweeper || {};
-        if (!ms.enabled) return null;
+        if (ms.enabled === false) return null;
 
         const now = new Date();
         const minutes = now.getMinutes() + now.getSeconds() / 60;
-        const t = minutes / 60; // 0..1 per hour
+        const t = minutes / 60; // 0..1 över timmen
 
-        const span = cfg.end_angle - cfg.start_angle || 360;
-        const angle = cfg.start_angle + span * t;
+        const geom = this._getClockGeometry(cfg);
+        const span = geom.span;
+        const angle = geom.start + span * t;
 
         return {
           angle,
           color: ms.color || "#FFFFFF",
           width: ms.width || 1.2,
           opacity: ms.opacity ?? 1,
+          show_dash: ms.show_dash !== false,
+          dash_radius: ms.dash_radius != null ? Number(ms.dash_radius) : 1.1,
         };
       }
 
       _buildSecondSweeper(cfg) {
         const sw = cfg.second_sweeper || {};
-        if (!sw.enabled) return null;
+        if (sw.enabled === false) return null;
         const now = new Date();
         const seconds = now.getSeconds() + now.getMilliseconds() / 1000;
         return {
@@ -1317,8 +1453,12 @@ _buildLayerData(cfg, hass) {
           color: sw.color || "#FF4081",
           width: sw.width || 1.0,
           opacity: sw.opacity ?? 1,
+          show_dash: sw.show_dash !== false,
+          dash_radius: sw.dash_radius != null ? Number(sw.dash_radius) : 1.1,
         };
       }
+
+ 
 
       _renderHourSweeperSvg(sw, radius, centerPivot) {
         const inner = centerPivot ? 0 : radius * 0.1;
@@ -1326,7 +1466,7 @@ _buildLayerData(cfg, hass) {
         const pInner = polarToCartesian(inner, sw.angle);
         const pOuter = polarToCartesian(outer, sw.angle);
 
-        return `
+        const lineSvg = `
           <line
             x1="${pInner.x}"
             y1="${pInner.y}"
@@ -1337,14 +1477,23 @@ _buildLayerData(cfg, hass) {
             stroke-linecap="round"
             stroke-opacity="${sw.opacity ?? 1}"
           ></line>
+        `;
+
+        const dashRadius = sw.dash_radius != null ? Number(sw.dash_radius) : 1.3;
+        const dashSvg =
+          sw.show_dash === false
+            ? ""
+            : `
           <circle
             cx="${pOuter.x}"
             cy="${pOuter.y}"
-            r="1.3"
+            r="${dashRadius}"
             fill="${sw.color}"
             fill-opacity="${sw.opacity ?? 1}"
           ></circle>
         `;
+
+        return lineSvg + dashSvg;
       }
 
       _renderMinuteSweeperSvg(sw, radius, centerPivot) {
@@ -1353,7 +1502,7 @@ _buildLayerData(cfg, hass) {
         const pInner = polarToCartesian(inner, sw.angle);
         const pOuter = polarToCartesian(outer, sw.angle);
 
-        return `
+        const lineSvg = `
           <line
             x1="${pInner.x}"
             y1="${pInner.y}"
@@ -1365,11 +1514,41 @@ _buildLayerData(cfg, hass) {
             stroke-opacity="${sw.opacity ?? 1}"
           ></line>
         `;
+
+        const dashRadius = sw.dash_radius != null ? Number(sw.dash_radius) : 1.1;
+        const dashSvg =
+          sw.show_dash === false
+            ? ""
+            : `
+          <circle
+            cx="${pOuter.x}"
+            cy="${pOuter.y}"
+            r="${dashRadius}"
+            fill="${sw.color}"
+            fill-opacity="${sw.opacity ?? 1}"
+          ></circle>
+        `;
+
+        return lineSvg + dashSvg;
       }
 
       _renderSecondSweeperSvgSmooth(cfg, sw, radius, centerPivot) {
         const inner = centerPivot ? 0 : radius * 0.1;
         const outer = radius;
+        const dashRadius = sw.dash_radius != null ? Number(sw.dash_radius) : 1.1;
+
+        const dashSvg =
+          sw.show_dash === false
+            ? ""
+            : `
+            <circle
+              cx="0"
+              cy="${-outer}"
+              r="${dashRadius}"
+              fill="${sw.color}"
+            ></circle>
+          `;
+
         return `
           <g
             class="second-sweeper-group"
@@ -1389,15 +1568,11 @@ _buildLayerData(cfg, hass) {
               stroke-width="${sw.width}"
               stroke-linecap="round"
             ></line>
-            <circle
-              cx="0"
-              cy="${-outer}"
-              r="1.3"
-              fill="${sw.color}"
-            ></circle>
+            ${dashSvg}
           </g>
         `;
       }
+
 
       _renderCenterLayersHtml(cfg, hass) {
         const layers = cfg.center_layers || [];
@@ -1445,11 +1620,18 @@ _buildLayerData(cfg, hass) {
           }
 
           if (!text) return;
+          
+          // Optional per-item vertical offset (px). If empty/undefined -> keep current auto layout.
+          let marginTopCss = "";
+          if (lc.top_margin !== undefined && lc.top_margin !== null && lc.top_margin !== "") {
+            const mt = Number(lc.top_margin);
+            if (!isNaN(mt)) marginTopCss = `transform: translateY(${mt}px)`; //marginTopCss = `margin-top:${mt}px`;
+          }          
 
           const style = [
             `font-size:${lc.font_size || 14}px`,
             `font-weight:${lc.font_weight || 400}`,
-            `color:${lc.color || "var(--primary-text-color)"}`,
+            `color:${lc.color || "var(--primary-text-color)"}`,marginTopCss,
           ].join(";");
 
           const cls = icon ? "center-line icon-line" : "center-line";
@@ -1912,24 +2094,9 @@ _buildLayerData(cfg, hass) {
                 <mwc-list-item value="true">Yes</mwc-list-item>
                 <mwc-list-item value="false">No</mwc-list-item>
               </ha-select>
+              
             </div>
 
-            <div class="row-inline">
-              <ha-textfield
-                type="number"
-                label="Start angle"
-                .value=${cfg.start_angle ?? -7.5}
-                @input=${(e) =>
-                  this._updateRoot("start_angle", Number(e.target.value))}
-              ></ha-textfield>
-              <ha-textfield
-                type="number"
-                label="End angle"
-                .value=${cfg.end_angle ?? 352.5}
-                @input=${(e) =>
-                  this._updateRoot("end_angle", Number(e.target.value))}
-              ></ha-textfield>
-            </div>
 
             <div class="row-inline">
               <ha-textfield
@@ -2009,21 +2176,21 @@ _buildLayerData(cfg, hass) {
 
           <div class="section">
             <div class="section-header-bar">
-              <div class="section-header">Hour hand (hour sweeper)</div>
+              <div class="section-header">Hour sweeper</div>
             </div>
             ${this._renderHourSweeperSection()}
           </div>
 
           <div class="section">
             <div class="section-header-bar">
-              <div class="section-header">Minute hand</div>
+              <div class="section-header">Minute sweeper</div>
             </div>
             ${this._renderMinuteSweeperSection()}
           </div>
 
           <div class="section">
             <div class="section-header-bar">
-              <div class="section-header">Second hand</div>
+              <div class="section-header">Second sweeper</div>
             </div>
             ${this._renderSecondSweeperSection()}
           </div>
@@ -2145,19 +2312,7 @@ _buildLayerData(cfg, hass) {
               <mwc-list-item value="false">Disabled</mwc-list-item>
             </ha-select>
 
-            <ha-select
-              label="Hour source"
-              .value=${sw.use_system_time === false ? "entity" : "system"}
-              @selected=${(e) =>
-                this._updateHourSweeper(
-                  "use_system_time",
-                  e.target.value === "system"
-                )}
-              @closed=${this._stopPropagation}
-            >
-              <mwc-list-item value="system">System time</mwc-list-item>
-              <mwc-list-item value="entity">From entity</mwc-list-item>
-            </ha-select>
+
           </div>
 
           <div class="row-inline">
@@ -2194,15 +2349,29 @@ _buildLayerData(cfg, hass) {
                 this._updateHourSweeper("opacity", Number(e.target.value))}
             ></ha-textfield>
           </div>
+          
+        <div class="row-inline">
+          <ha-formfield label="Show hour tip">
+            <ha-switch
+              .checked=${sw.show_dash !== false}
+              @change=${(e) =>
+                this._updateHourSweeper("show_dash", e.target.checked)}
+            ></ha-switch>
+          </ha-formfield>
+          <ha-textfield
+            type="number"
+            label="Hour tip radius"
+            .value=${sw.dash_radius ?? 1.3}
+            @input=${(e) =>
+              this._updateHourSweeper(
+                "dash_radius",
+                Number(e.target.value)
+              )}
+          ></ha-textfield>
+        </div>
 
-          <div class="row-inline">
-            <ha-textfield
-              label="Hour entity (when not system time)"
-              .value=${sw.entity || ""}
-              @input=${(e) =>
-                this._updateHourSweeper("entity", e.target.value)}
-            ></ha-textfield>
-          </div>
+
+
         `;
       }
 
@@ -2267,6 +2436,27 @@ _buildLayerData(cfg, hass) {
                 )}
             ></ha-textfield>
           </div>
+          
+        <div class="row-inline">
+          <ha-formfield label="Show minute tip">
+            <ha-switch
+              .checked=${sw.show_dash !== false}
+              @change=${(e) =>
+                this._updateMinuteSweeper("show_dash", e.target.checked)}
+            ></ha-switch>
+          </ha-formfield>
+          <ha-textfield
+            type="number"
+            label="Minute tip radius"
+            .value=${sw.dash_radius ?? 1.1}
+            @input=${(e) =>
+              this._updateMinuteSweeper(
+                "dash_radius",
+                Number(e.target.value)
+              )}
+          ></ha-textfield>
+        </div>
+
         `;
       }
 
@@ -2331,6 +2521,28 @@ _buildLayerData(cfg, hass) {
                 )}
             ></ha-textfield>
           </div>
+          
+        <div class="row-inline">
+          <ha-formfield label="Show second tip">
+            <ha-switch
+              .checked=${sw.show_dash !== false}
+              @change=${(e) =>
+                this._updateSecondSweeper("show_dash", e.target.checked)}
+            ></ha-switch>
+          </ha-formfield>
+          <ha-textfield
+            type="number"
+            label="Second tip radius"
+            .value=${sw.dash_radius ?? 1.1}
+            @input=${(e) =>
+              this._updateSecondSweeper(
+                "dash_radius",
+                Number(e.target.value)
+              )}
+          ></ha-textfield>
+        </div>
+
+          
 
           <div class="small">
             Second hand is smooth (continuous) and rotates one full lap every 60 seconds.
@@ -3001,6 +3213,7 @@ _buildLayerData(cfg, hass) {
           font_size: 24,
           font_weight: 600,
           color: "var(--primary-text-color)",
+          top_margin: "",
         });
         this._config = { ...this._config, center_layers };
         this._expandedCenterIndex = center_layers.length - 1;
@@ -3188,6 +3401,20 @@ _buildLayerData(cfg, hass) {
                       `}
 
                   <div class="row-inline">
+                    <ha-textfield
+                      type="number"
+                      label="Top margin (px) (optional)"
+                      .value=${cl.top_margin ?? ""}
+                      @input=${(e) =>
+                        this._updateCenterLayer(
+                          idx,
+                          "top_margin",
+                          e.target.value === "" ? "" : Number(e.target.value)
+                        )}
+                    ></ha-textfield> 
+
+
+
                     <ha-textfield
                       type="number"
                       label="Font size (px)"
