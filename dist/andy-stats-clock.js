@@ -1,7 +1,7 @@
 (() => {
 /**
  * Andy Stats Clock
- * v1.0.4
+ * v1.0.5
  * ------------------------------------------------------------------
  * Developed by: Andreas ("AndyBonde") with some help from AI :).
  *
@@ -18,12 +18,12 @@
  *
  *
  */
-
   const CARD_TAG = "andy-stats-clock";
   const EDITOR_TAG = "andy-stats-clock-editor";
-  
+  const VERSION = "v1.0.5"
+
   console.info(
-    `%c Andy Stats Clock %c v1.0.4 loaded `,
+    `%c Andy Stats Clock %c ${VERSION} loaded Development `,
     "color: white; background: #4A148C; padding: 4px 8px; border-radius: 4px 0 0 4px;",
     "color: white; background: #6A1B9A; padding: 4px 8px; border-radius: 0 4px 4px 0;"
   );
@@ -54,6 +54,7 @@
     radius: 45,
     layer_gap: 2,
     hands_center_pivot: false, // shared hub
+    scale: 1, //v1.04
 
     // Outer minute ticks
     outer_ticks: {
@@ -276,6 +277,15 @@
   // Always system hour (for AM/PM, 12h slicing)
   function getSystemHour() {
     return new Date().getHours();
+    //Turn on below to be able to force time change for testing
+    //const forced = window.__andy_stats_clock_force_hour;
+   //if (forced !== undefined && forced !== null && forced !== "" && !isNaN(Number(forced))) {
+    // return Number(forced);
+   //}
+   //return new Date().getHours();    
+    
+    
+    
   }
 
   // ----------------------------------------------------------
@@ -290,6 +300,7 @@
         this._hass = null;
         this._historyCache = {};
         this.attachShadow({ mode: "open" });
+
       }
 
       static getConfigElement() {
@@ -409,7 +420,12 @@
         this._render();
       }
 
-      disconnectedCallback() {}
+      //disconnectedCallback() {}
+      disconnectedCallback() {
+        try {
+          if (this._scaleResizeObs) this._scaleResizeObs.disconnect();
+        } catch (e) {}
+      }      
 
       _getPeriodString(cfg) {
         const mode = cfg.clock_mode || "24h";
@@ -565,10 +581,27 @@
             align-items: center;
             justify-content: center;
           }
+          
+         .scale-host {
+            width: 100%;
+            position: relative;
+            display: block;
+          }
+
+         .scale-wrap {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            backface-visibility: hidden;
+            transform-origin: top center;
+          }
+          
+          
           svg {
             width: 100%;
             height: auto;
-            max-height: 400px;
             display: block;
           }
           .center-content {
@@ -632,9 +665,40 @@
         this.shadowRoot.appendChild(style);
 
         const card = document.createElement("ha-card");
+        
+        //v1.0.4 Scale
+        // Global scale (keeps proportions). Defaults to 1.
+        const sNum = Number(cfg?.scale);
+        const scale = !isNaN(sNum) ? Math.max(0.1, Math.min(4, sNum)) : 1;
+        
+        const scaleHost = document.createElement("div");
+        scaleHost.classList.add("scale-host");        
+        
+        
+        const scaleWrap = document.createElement("div");
+        scaleWrap.classList.add("scale-wrap");
+        scaleWrap.style.transform = `scale(${scale})`;
+        scaleWrap.style.transformOrigin = "top center";
+        //scaleWrap.style.height = `${Math.round(400 * scale)}px`;
+
+        // Prevent clipping when scaled up (CSS sets overflow:hidden by default)
+        if (scale !== 1) card.style.overflow = "visible";
+        
         const wrapper = document.createElement("div");
         wrapper.classList.add("wrapper");
-        card.appendChild(wrapper);
+        //v1.0.4 card.appendChild(wrapper);
+        scaleWrap.appendChild(wrapper);
+        //card.appendChild(scaleWrap);
+        
+        scaleHost.appendChild(scaleWrap);
+        card.appendChild(scaleHost);
+
+        // store refs for dynamic height updates
+        this._scaleHostEl = scaleHost;
+        this._scaleWrapEl = scaleWrap;
+        
+
+        
         this.shadowRoot.appendChild(card);
 
         if (!cfg || !hass) {
@@ -746,10 +810,64 @@
         const bottomDiv = document.createElement("div");
         bottomDiv.classList.add("bottom-strip");
         bottomDiv.innerHTML = this._renderBottomLayersHtml(cfg, hass);
-        card.appendChild(bottomDiv);
+        //v1.0.4 card.appendChild(bottomDiv);
+        scaleWrap.appendChild(bottomDiv);
 
         card.style.background = cfg.style.background || card.style.background;
+        
+        // Recompute layout height after all content exists (SVG + center + bottom)
+        requestAnimationFrame(() => this._updateScaleLayout());
+        this._ensureScaleObserver(card);
       }
+      
+      
+      _updateScaleLayout() {
+        if (!this._config || !this._scaleHostEl || !this._scaleWrapEl) return;
+
+        const sNum = Number(this._config.scale);
+        const scale = !isNaN(sNum) ? Math.max(0.1, Math.min(4, sNum)) : 1;
+
+        // Apply visual scale
+        //this._scaleWrapEl.style.transform = `scale(${scale})`;
+        if (Math.abs(scale - 1) < 0.0001) {
+          this._scaleWrapEl.style.transform = "";
+        } else {
+          this._scaleWrapEl.style.transform = `scale(${scale})`;
+        }
+
+        
+        
+        this._scaleWrapEl.style.transformOrigin = "top center";
+
+        // Measure unscaled content height (includes SVG + bottom layers)
+        // transform does NOT affect offsetHeight/scrollHeight
+        const naturalH = this._scaleWrapEl.scrollHeight || this._scaleWrapEl.offsetHeight || 0;
+        const scaledH = Math.max(1, Math.ceil(naturalH * scale));
+
+        // Make HA layout follow the scaled visual height -> no empty space, no clipping
+        this._scaleHostEl.style.height = `${scaledH}px`;
+
+        // Avoid clipping when scaled up
+        const card = this.shadowRoot?.querySelector("ha-card");
+        if (card) card.style.overflow = scale > 1 ? "visible" : "hidden";
+      }
+
+      _ensureScaleObserver(cardEl) {
+        if (!cardEl) return;
+        if (!this._scaleResizeObs) {
+          this._scaleResizeObs = new ResizeObserver(() => {
+            // Wait one frame so layout has settled
+            requestAnimationFrame(() => this._updateScaleLayout());
+          });
+        }
+        this._scaleResizeObs.disconnect();
+        this._scaleResizeObs.observe(cardEl);
+      }
+
+      
+      
+      
+
 
       // ---- building data ----
 
@@ -770,8 +888,16 @@ _buildLayerData(cfg, hass) {
     let values = this._resolveLayerValues(lc, hass, stateObj);
     if (!values || !values.length) return;
 
-    // ---- Anpassa till 12h / 24h-läge ----
-    values = sliceValuesForClockMode(values, cfg);
+    //v1.0.4
+    //values = sliceValuesForClockMode(values, cfg);
+    
+     // In 12h mode: normally we slice to AM/PM.
+     // But when keep_across_midnight is enabled, we keep full 24 buckets so previous half-day can be faded instead of disappearing.
+     if (!(cfg.clock_mode === "12h" && lc.keep_across_midnight === true && values.length >= 24)) {
+       values = sliceValuesForClockMode(values, cfg);
+     }
+    
+    
     if (!values || !values.length) return;
 
     const unit =
@@ -1168,16 +1294,22 @@ _getClockGeometryLabels(cfg) {
           let opacity = baseOpacity;
           if (lc.keep_across_midnight === true && lc.fade_previous_day === true) {
             const nowHour = getSystemHour(); // 0..23
-            let bucketHour = i;
-            if (cfg.clock_mode === "12h" && n === 12) {
-              // In 12h mode with 12 buckets, map i -> 0..11 (AM) or 12..23 (PM)
-              const offset = nowHour >= 12 ? 12 : 0;
-              bucketHour = offset + i;
-            }
-            // Hours ahead of current hour are still "yesterday" right after midnight when keep is enabled.
-            if (bucketHour > nowHour) {
-              const f = Number(lc.fade_previous_day_opacity ?? 0.25);
-              if (!isNaN(f)) opacity = baseOpacity * Math.max(0, Math.min(1, f));
+            const f = Number(lc.fade_previous_day_opacity ?? 0.25);
+            const fade = isNaN(f) ? 0.25 : Math.max(0, Math.min(1, f));
+
+            if (cfg.clock_mode === "12h" && n >= 24) {
+              // 12h view but we keep 24 buckets: fade the "other half" (AM vs PM)
+              const isPmNow = nowHour >= 12;
+              const inCurrentHalf = isPmNow ? (i >= 12 && i <= 23) : (i >= 0 && i <= 11);
+              if (!inCurrentHalf) opacity = baseOpacity * fade;
+            } else {
+              // 24h (or 12h with sliced 12 values): fade hours ahead of current time (useful right after midnight)
+              let bucketHour = i;
+              if (cfg.clock_mode === "12h" && n === 12) {
+                const offset = nowHour >= 12 ? 12 : 0;
+                bucketHour = offset + i;
+              }
+              if (bucketHour > nowHour) opacity = baseOpacity * fade;
             }
           }
 
@@ -2103,7 +2235,7 @@ _renderHourLabelsSvg(cfg, r) {
           <div class="section">
             <div class="section-header-bar">
               <div class="section-header">General</div>
-              <div class="section-header-right">v0.3.6</div>
+              <div class="section-header-right">${VERSION}</div>
             </div>
             <div class="row-inline">
               <ha-select
@@ -2221,6 +2353,20 @@ _renderHourLabelsSvg(cfg, r) {
                 @input=${(e) =>
                   this._updateHub("opacity", Number(e.target.value))}
               ></ha-textfield>
+              
+              <ha-textfield
+                type="number"
+                step="0.01"
+                min="0.1"
+                max="4"
+                label="Card scale (0.1-4)"
+                .value=${cfg.scale ?? 1}
+                @input=${(e) =>
+                  this._updateRoot("scale", Number(e.target.value))}
+              ></ha-textfield>
+              
+              
+              
             </div>
           </div>
 
