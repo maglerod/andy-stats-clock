@@ -1,7 +1,7 @@
 (() => {
 /**
  * Andy Stats Clock
- * v1.0.3
+ * v1.0.4
  * ------------------------------------------------------------------
  * Developed by: Andreas ("AndyBonde") with some help from AI :).
  *
@@ -23,7 +23,7 @@
   const EDITOR_TAG = "andy-stats-clock-editor";
   
   console.info(
-    `%c Andy Stats Clock %c v1.0.3 loaded Development `,
+    `%c Andy Stats Clock %c v1.0.4 loaded `,
     "color: white; background: #4A148C; padding: 4px 8px; border-radius: 4px 0 0 4px;",
     "color: white; background: #6A1B9A; padding: 4px 8px; border-radius: 0 4px 4px 0;"
   );
@@ -421,7 +421,10 @@
       _getHistory24ForLayer(lc, hass, stateObj) {
         if (!hass || !lc || !lc.entity) return [];
         const entityId = lc.entity;
-        const cacheKey = `${entityId}::today24`;
+        //1.0.4
+        //const cacheKey = `${entityId}::today24`;
+        const cacheKey = `${entityId}::${lc.id || "layer"}::today24::${lc.keep_across_midnight ? "keep" : "reset"}`;
+        
         const now = Date.now();
         const ttlMs = 5 * 60 * 1000;
 
@@ -454,8 +457,19 @@
               if (Array.isArray(res) && res.length > 0 && Array.isArray(res[0])) {
                 series = res[0];
               }
+              
+              //v1.0.4
+              //const buckets = new Array(24).fill(null);
+              // If keep_across_midnight: seed with previous buckets (24) and overwrite per hour.
+              const prev =
+                lc.keep_across_midnight &&
+                Array.isArray(existing?.values) &&
+                existing.values.length === 24
+                  ? existing.values
+                  : null;
+              const buckets = prev ? prev.slice() : new Array(24).fill(null);
+              
 
-              const buckets = new Array(24).fill(null);
 
               series.forEach((pt) => {
                 const ts =
@@ -1146,7 +1160,26 @@ _getClockGeometryLabels(cfg) {
           }
 
           const path = makeRingSegmentPath(rInner, rOuter, angleStart, angleEnd);
-          const opacity = lc.opacity != null ? lc.opacity : 1.0;
+          //v1.0.4
+          //const opacity = lc.opacity != null ? lc.opacity : 1.0;
+          const baseOpacity = lc.opacity != null ? lc.opacity : 1.0;
+          // Fade "previous day" segments when keeping across midnight.
+          // Works for both 24h (values[0..23]) and 12h (values[0..11] == AM/PM window).
+          let opacity = baseOpacity;
+          if (lc.keep_across_midnight === true && lc.fade_previous_day === true) {
+            const nowHour = getSystemHour(); // 0..23
+            let bucketHour = i;
+            if (cfg.clock_mode === "12h" && n === 12) {
+              // In 12h mode with 12 buckets, map i -> 0..11 (AM) or 12..23 (PM)
+              const offset = nowHour >= 12 ? 12 : 0;
+              bucketHour = offset + i;
+            }
+            // Hours ahead of current hour are still "yesterday" right after midnight when keep is enabled.
+            if (bucketHour > nowHour) {
+              const f = Number(lc.fade_previous_day_opacity ?? 0.25);
+              if (!isNaN(f)) opacity = baseOpacity * Math.max(0, Math.min(1, f));
+            }
+          }
 
           segs += `
             <path
@@ -2656,6 +2689,10 @@ _renderHourLabelsSvg(cfg, r) {
             max_label: "",
             avg_label: "",
           },
+          //v1.0.4
+          keep_across_midnight: false,
+          fade_previous_day: false,
+          fade_previous_day_opacity: 0.25,
         });
         this._config = { ...this._config, layers };
         this._expandedLayerIndex = layers.length - 1;
@@ -2862,6 +2899,104 @@ _renderHourLabelsSvg(cfg, r) {
                     (e.g. <code>today</code> for Nordpool).
                     Value path: property inside each array item (e.g. <code>value</code>).
                   </div>
+                  
+                  
+                  ${(
+                    layer.price_source === "history" ||
+                    layer.type === "consumption" ||
+                    layer.type === "history"
+                  )
+                    ? html`
+                        <div class="row-inline" style="margin-top:4px;">
+                          <ha-switch
+                            .checked=${layer.keep_across_midnight === true}
+                            @change=${(e) =>
+                              this._updateLayer(
+                                idx,
+                                "keep_across_midnight",
+                                e.target.checked
+                              )}
+                          ></ha-switch>
+                          <span class="small"
+                            >Keep values across midnight (overwrite per hour)</span
+                          >
+                        </div>
+
+                        ${layer.keep_across_midnight === true
+                          ? html`
+                              <div class="row-inline" style="margin-top:4px;">
+                                <ha-switch
+                                  .checked=${layer.fade_previous_day === true}
+                                  @change=${(e) =>
+                                    this._updateLayer(
+                                      idx,
+                                      "fade_previous_day",
+                                      e.target.checked
+                                    )}
+                                ></ha-switch>
+                                <span class="small">Fade previous-day segments</span>
+                              </div>
+
+                              ${layer.fade_previous_day === true
+                                ? html`
+                                    <div class="row-inline">
+                                      <ha-textfield
+                                        type="number"
+                                        step="0.01"
+                                        min="0"
+                                        max="1"
+                                        label="Previous-day opacity (0–1)"
+                                        .value=${layer.fade_previous_day_opacity ?? 0.25}
+                                        @input=${(e) =>
+                                          this._updateLayer(
+                                            idx,
+                                            "fade_previous_day_opacity",
+                                            Number(e.target.value)
+                                          )}
+                                      ></ha-textfield>
+                                    </div>
+                                  `
+                                : html``}
+                            `
+                          : html``}
+                      `
+                    : html``}
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
 
                   <div class="row-inline" style="margin-top:4px;">
                     <ha-textfield
