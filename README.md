@@ -1,4 +1,4 @@
-# 📟 Andy Stats Clock – v1.0.3
+# 📟 Andy Stats Clock – v1.0.4
 A next-generation multi-layer radial statistics clock for Home Assistant.
 Perfect for visualizing energy prices, consumption, temperature, historical sensor trends, or any numeric entity — all presented in a beautiful 12h/24h circular layout.
 
@@ -28,6 +28,7 @@ Each ring can be configured independently with:
  * 24h or 12h interpretation
  * Automatic history loading for normal sensors
  * Auto-fallback when future values are unknown
+ * Keep history of "History / Consumption layers" / fade history / change opacity
 
 ✔ Multiple time modes
 
