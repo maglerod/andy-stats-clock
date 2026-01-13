@@ -5,7 +5,9 @@ Perfect for visualizing energy prices, consumption, temperature, historical sens
 This is not just a clock — it’s an interactive, animated, data-driven radial dashboard component
 
 ![Preview 1_0_5](images/preview_12h_2.png)
+![Preview 1_0_5_1](images/preview_12h_3.png)
 ![Preview 1_0_5_2](images/preview_24h_2.png)
+![Preview 1_0_5_3](images/preview_24h_3.png)
 ![Preview 1_0_5_3](images/preview_12h_clockonly_2.png)
 
 > **Recommended installation method:** HACS  
