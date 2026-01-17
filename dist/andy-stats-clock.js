@@ -3707,6 +3707,7 @@ _renderHourLabelsSvg(cfg, r) {
                               <div class="row-inline">
                                 <ha-textfield
                                   type="number"
+                                  step="0.1"
                                   label="From"
                                   .value=${intv.from ?? 0}
                                   @input=${(e) =>
@@ -3719,6 +3720,7 @@ _renderHourLabelsSvg(cfg, r) {
                                 ></ha-textfield>
                                 <ha-textfield
                                   type="number"
+                                  step="0.1"
                                   label="To"
                                   .value=${intv.to ?? 100}
                                   @input=${(e) =>
