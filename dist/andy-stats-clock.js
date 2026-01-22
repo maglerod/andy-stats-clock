@@ -1,7 +1,7 @@
 (() => {
 /**
  * Andy Stats Clock
- * v1.0.7 Beta
+ * v1.0.8 Beta
  * ------------------------------------------------------------------
  * Developed by: Andreas ("AndyBonde") with some help from AI :).
  *
@@ -20,7 +20,7 @@
  */
   const CARD_TAG = "andy-stats-clock";
   const EDITOR_TAG = "andy-stats-clock-editor";
-  const VERSION = "v1.0.7 Beta"
+  const VERSION = "v1.0.8 Beta"
 
   console.info(
     `%c Andy Stats Clock %c ${VERSION} loaded `,
@@ -589,51 +589,51 @@ const fireEvent = (node, type, detail, options) => {
               // NOTE: History can be sparse (only changes). To keep the ring stable, we fill-forward within today for passed hours.
               const todayFilled = todayBuckets.slice();
 
-// History can be sparse. For hours that already happened today we "fill forward" so we don't lose
-// already-known segments when keep is toggled.
-// If we don't have any bucket yet for today (0..nowHour), fall back to current state as the baseline.
-let baselineToday = null;
-for (let i = 0; i <= nowIndex; i++) {
-  if (todayBuckets[i] != null && !isNaN(todayBuckets[i])) { baselineToday = todayBuckets[i]; break; }
-}
-if (baselineToday == null) {
-  const cur = Number(stateObj.state);
-  baselineToday = isNaN(cur) ? null : cur;
-}
+            // History can be sparse. For hours that already happened today we "fill forward" so we don't lose
+            // already-known segments when keep is toggled.
+            // If we don't have any bucket yet for today (0..nowHour), fall back to current state as the baseline.
+            let baselineToday = null;
+            for (let i = 0; i <= nowIndex; i++) {
+                if (todayBuckets[i] != null && !isNaN(todayBuckets[i])) { baselineToday = todayBuckets[i]; break; }
+            }
+            if (baselineToday == null) {
+                const cur = Number(stateObj.state);
+                baselineToday = isNaN(cur) ? null : cur;
+            }
 
-let lastToday = baselineToday;
-for (let i = 0; i < bucketsLen; i++) {
-  if (todayBuckets[i] != null && !isNaN(todayBuckets[i])) lastToday = todayBuckets[i];
-  if (i <= nowIndex) {
-    todayFilled[i] = lastToday;
-  } else {
-    // Future should be empty in the base series
-    todayFilled[i] = null;
-  }
-}
+            let lastToday = baselineToday;
+            for (let i = 0; i < bucketsLen; i++) {
+                if (todayBuckets[i] != null && !isNaN(todayBuckets[i])) lastToday = todayBuckets[i];
+                if (i <= nowIndex) {
+                    todayFilled[i] = lastToday;
+                } else {
+                    // Future should be empty in the base series
+                    todayFilled[i] = null;
+                }
+            }
 
-const buckets = new Array(bucketsLen).fill(null);
-const prevMask = new Array(bucketsLen).fill(false); // true where value comes from yesterday
-
-for (let i = 0; i < bucketsLen; i++) {
-  if (i <= nowIndex) {
-    // Past/now: ALWAYS today's values (filled-forward), never backfill from yesterday
-    buckets[i] = todayFilled[i];
-  } else if (lc.keep_across_midnight === true) {
-    // Future: keep today's if present, otherwise backfill from yesterday and mark for fading
-    if (todayBuckets[i] != null && !isNaN(todayBuckets[i])) {
-      buckets[i] = todayBuckets[i];
-    } else if (yestBuckets[i] != null && !isNaN(yestBuckets[i])) {
-      buckets[i] = yestBuckets[i];
-      prevMask[i] = true;
-    } else {
-      buckets[i] = null;
-    }
-  } else {
-    // Future: no keep -> remain empty
-    buckets[i] = null;
-  }
-}
+            const buckets = new Array(bucketsLen).fill(null);
+            const prevMask = new Array(bucketsLen).fill(false); // true where value comes from yesterday
+    
+            for (let i = 0; i < bucketsLen; i++) {
+                if (i <= nowIndex) {
+                    // Past/now: ALWAYS today's values (filled-forward), never backfill from yesterday
+                    buckets[i] = todayFilled[i];
+                } else if (lc.keep_across_midnight === true) {
+                    // Future: keep today's if present, otherwise backfill from yesterday and mark for fading
+                    if (todayBuckets[i] != null && !isNaN(todayBuckets[i])) {
+                        buckets[i] = todayBuckets[i];
+                    } else if (yestBuckets[i] != null && !isNaN(yestBuckets[i])) {
+                        buckets[i] = yestBuckets[i];
+                        prevMask[i] = true;
+                } else {
+                    buckets[i] = null;
+                }
+            } else {
+                // Future: no keep -> remain empty
+                buckets[i] = null;
+                }
+            }
 
 
               // For stable gradients: compute min/max on today's known window only (no backfilled values)
@@ -1505,6 +1505,13 @@ if (isHistoryLayer && lc.keep_across_midnight === true) {
             ? { ...lc, keep_across_midnight: false }
             : lc;
 
+          // Optional: render yesterday's series (for comparison layers) without affecting today's series.
+          const dayOffset = Number(lc && lc.day_offset != null ? lc.day_offset : 0);
+          if (dayOffset === 1) {
+            const yVals = this._getYesterday24ForLayer(baseLc, hass, st);
+            if (yVals && yVals.length) return yVals;
+          }
+
           const historyVals = this._getHistory24ForLayer(baseLc, hass, st);
           if (historyVals && historyVals.length) {
             return historyVals;
@@ -1676,6 +1683,7 @@ _getClockGeometryLabels(cfg) {
           // This guarantees today's colors never overwrite yesterday overlay in future segments.
           const skipBase =
             lc.keep_across_midnight === true &&
+            Number(lc.day_offset || 0) !== 1 &&
             overlayMask &&
             overlayMask[i] === true;
 
@@ -2397,12 +2405,26 @@ _renderHourLabelsSvg(cfg, r) {
           _expandedLayerIndex: { type: Number },
           _expandedCenterIndex: { type: Number },
           _expandedBottomIndex: { type: Number },
+
+          // Preview dialog (entity data)
+          _previewOpen: { type: Boolean },
+          _previewTitle: { type: String },
+          _previewText: { type: String },
+          _inlinePreviewKey: { type: String },
+          _inlinePreviewText: { type: String },
         };
       }
 
       constructor() {
         super();
         this._config = deepMerge(StatsClockDefaultConfig, {});
+
+        // Preview dialog state
+        this._previewOpen = false;
+        this._previewTitle = "";
+        this._previewText = "";
+        this._inlinePreviewKey = "";
+        this._inlinePreviewText = "";
         // All collapsed initially
         this._expandedLayerIndex = -1;
         this._expandedCenterIndex = -1;
@@ -2441,6 +2463,48 @@ _renderHourLabelsSvg(cfg, r) {
 
       _stopPropagation(ev) {
         ev.stopPropagation();
+      }
+
+
+      _openEntityPreview(title, text) {
+        this._previewTitle = title || "Entity data preview";
+        this._previewText = text || "";
+        this._previewOpen = true;
+        this.requestUpdate();
+      }
+
+      _closeEntityPreview() {
+        this._previewOpen = false;
+        this.requestUpdate();
+      }
+
+      _buildEntityPreview(layer, sectionLabel) {
+        try {
+          const entityId = layer && layer.entity ? String(layer.entity) : "";
+          if (!entityId) return "No entity selected for this layer.";
+          const st = this.hass && this.hass.states ? this.hass.states[entityId] : null;
+          if (!st) return `Entity not found in hass.states: ${entityId}`;
+
+          const attrKeys = st.attributes ? Object.keys(st.attributes).sort() : [];
+          const pickAttr = layer && layer.attribute ? String(layer.attribute) : "";
+          const picked = pickAttr && st.attributes ? st.attributes[pickAttr] : undefined;
+
+          const info = {
+            entity_id: st.entity_id,
+            state: st.state,
+            last_changed: st.last_changed,
+            last_updated: st.last_updated,
+            attributes_keys: attrKeys,
+            picked_attribute: pickAttr || null,
+            picked_attribute_type: picked == null ? null : (Array.isArray(picked) ? "array" : typeof picked),
+            picked_attribute_preview: Array.isArray(picked) ? picked.slice(0, 6) : picked,
+            attributes: st.attributes
+          };
+
+          return JSON.stringify(info, null, 2);
+        } catch (e) {
+          return `Failed to build preview: ${e && e.message ? e.message : e}`;
+        }
       }
 
       _normalizeColorInput(val) {
@@ -3192,16 +3256,16 @@ _renderHourLabelsSvg(cfg, r) {
             </div>
             
             <ha-textfield
-  type="number"
-  label="Second hand length (scale)"
-  step="0.05"
-  .value=${sw.length_scale ?? 1}
-  @input=${(e) =>
-    this._updateSecondSweeper(
-      "length_scale",
-      Number(e.target.value)
-    )}
-></ha-textfield>
+                type="number"
+                label="Second hand length (scale)"
+                step="0.05"
+                .value=${sw.length_scale ?? 1}
+                @input=${(e) =>
+                this._updateSecondSweeper(
+                    "length_scale",
+                    Number(e.target.value)
+                )}
+            ></ha-textfield>
 
             
 
@@ -3271,6 +3335,7 @@ _renderHourLabelsSvg(cfg, r) {
           price_source: "array",
           attribute: "today",
           value_path: "value",
+          day_offset: 0,
           radius: this._config.radius ?? 45,
           thickness: 8,
           opacity: 1.0,
@@ -3445,6 +3510,12 @@ _renderHourLabelsSvg(cfg, r) {
                     ></ha-textfield>
                   </div>
 
+                  ${this._inlinePreviewKey === `ring:${layer.id || idx}` && this._inlinePreviewText ? html`
+                    <div style="margin-top:8px; padding:10px; border-radius:10px; background: var(--card-background-color); border: 1px solid var(--divider-color); max-height: 180px; overflow: auto;">
+                      <pre style="margin:0; white-space:pre-wrap; font-size:12px; line-height:1.35;">${this._inlinePreviewText}</pre>
+                    </div>
+                  ` : ""}
+
                   <div class="row-inline">
                     <ha-select
                       label="Layer type"
@@ -3466,6 +3537,23 @@ _renderHourLabelsSvg(cfg, r) {
                       class="color-group"
                       id=${`layer-entity-picker-${idx}`}
                     ></div>
+                  </div>
+
+                  <div class="row-inline">
+                    <mwc-button
+                      @click=${(e) => {
+                        e.stopPropagation();
+                        const key = `ring:${layer.id || idx}`;
+                        if (this._inlinePreviewKey === key) {
+                          this._inlinePreviewKey = "";
+                          this._inlinePreviewText = "";
+                        } else {
+                          this._inlinePreviewKey = key;
+                          this._inlinePreviewText = this._buildEntityPreview(layer, "Ring");
+                        }
+                        this.requestUpdate();
+                      }}
+                    >Preview entity data</mwc-button>
                   </div>
 
                   <div class="row-inline">
@@ -3502,6 +3590,28 @@ _renderHourLabelsSvg(cfg, r) {
                         this._updateLayer(idx, "value_path", e.target.value)}
                     ></ha-textfield>
                   </div>
+
+                  ${(layer.price_source === "history" || layer.type === "consumption" || layer.type === "history")
+                    ? html`
+                        <div class="row-inline">
+                          <ha-select
+                            label="History day"
+                            .value=${String(layer.day_offset ?? 0)}
+                            @selected=${(e) =>
+                              this._updateLayer(
+                                idx,
+                                "day_offset",
+                                Number(e.target.value || 0)
+                              )}
+                            @closed=${this._stopPropagation}
+                          >
+                            <mwc-list-item value="0">Today</mwc-list-item>
+                            <mwc-list-item value="1">Yesterday</mwc-list-item>
+                          </ha-select>
+                        </div>
+                      `
+                    : html``}
+
                   <div class="small">
                     Attribute: name of the array attribute on the entity
                     (e.g. <code>today</code> for Nordpool).
@@ -3569,40 +3679,6 @@ _renderHourLabelsSvg(cfg, r) {
                           : html``}
                       `
                     : html``}
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
                   
                   
 
@@ -4550,7 +4626,25 @@ _renderHourLabelsSvg(cfg, r) {
                     </div>
                   </div>
                 `}
-          </div>
+          
+          <mwc-dialog
+            .open=${this._previewOpen}
+            heading=${this._previewTitle || "Entity data preview"}
+            @closed=${() => this._closeEntityPreview()}
+          >
+            <div style="max-width: 680px; width: 100%;">
+              <pre
+                style="white-space: pre-wrap; overflow: auto; max-height: 60vh; font-size: 12px; line-height: 1.3; margin: 0;"
+              >${this._previewText || ""}</pre>
+            </div>
+            <mwc-button
+              slot="primaryAction"
+              dialogAction="close"
+              @click=${() => this._closeEntityPreview()}
+            >Close</mwc-button>
+          </mwc-dialog>
+
+</div>
         `;
       }
     }
