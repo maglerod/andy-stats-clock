@@ -842,6 +842,151 @@ _getYesterday24ForLayer(lc, hass) {
   return this._historyCache[cacheKey]?.values || [];
 }
 
+// Fetch history for a specific day offset (0=today, 1=yesterday, N=N days ago).
+// Used by multi-day ring feature to get one day's data per ring.
+_getHistoryForDay(lc, hass, stateObj, dayOffset) {
+  if (!hass || !lc || !lc.entity) return [];
+  const entityId = lc.entity;
+
+  const isHistLayer = lc.price_source === "history" || lc.type === "history" || lc.type === "consumption";
+  const perHour = isHistLayer && lc.segment_count != null && Number(lc.segment_count) > 0
+    ? Math.max(1, Math.min(60, Math.floor(Number(lc.segment_count))))
+    : 1;
+  const bucketsLen = 24 * perHour;
+
+  // Cache key includes dayOffset so each day is cached independently
+  const cacheKey = `${entityId}::${lc.id || "layer"}::day${dayOffset}::seg${perHour}`;
+  const now = Date.now();
+  // Today gets shorter TTL since it changes; past days are more stable
+  const ttlMs = dayOffset === 0 ? 5 * 60 * 1000 : 10 * 60 * 1000;
+
+  const existing = this._historyCache[cacheKey];
+  if (existing && existing.values && now - existing.fetchedAt < ttlMs) {
+    return existing.values;
+  }
+  if (existing && existing.loading) {
+    return existing.values || [];
+  }
+
+  this._historyCache[cacheKey] = {
+    loading: true,
+    fetchedAt: now,
+    values: existing?.values || [],
+  };
+
+  try {
+    const nowDate = new Date();
+    const nowHour = nowDate.getHours();
+    const nowMin = nowDate.getMinutes();
+    const nowIndex = (nowHour * perHour) + Math.min(perHour - 1, Math.floor((nowMin * perHour) / 60));
+
+    // Calculate the day's start and end boundaries in local time
+    const dayStart = new Date(nowDate);
+    dayStart.setDate(dayStart.getDate() - dayOffset);
+    dayStart.setHours(0, 0, 0, 0);
+
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+
+    const iso = dayStart.toISOString();
+    const endIso = dayEnd.toISOString();
+    const url = `history/period/${iso}?end_time=${encodeURIComponent(endIso)}&filter_entity_id=${encodeURIComponent(
+      entityId
+    )}&minimal_response&significant_changes_only=0`;
+
+    hass
+      .callApi("GET", url)
+      .then((res) => {
+        let series = [];
+        if (Array.isArray(res) && res.length > 0 && Array.isArray(res[0])) {
+          series = res[0];
+        }
+
+        const buckets = new Array(bucketsLen).fill(null);
+
+        series.forEach((pt) => {
+          const ts = pt.last_updated || pt.last_changed || pt.time || pt.timestamp;
+          const d = ts ? new Date(ts) : null;
+          if (!d || isNaN(d.getTime())) return;
+
+          // Only accept points within [dayStart, dayEnd)
+          if (d < dayStart || d >= dayEnd) return;
+
+          const h = d.getHours();
+          if (h < 0 || h > 23) return;
+          const m = d.getMinutes();
+          const sub = perHour <= 1 ? 0 : Math.min(perHour - 1, Math.floor((m * perHour) / 60));
+          const idx = (h * perHour) + sub;
+          const v = Number(pt.state);
+          if (isNaN(v)) return;
+          buckets[idx] = v;
+        });
+
+        // Fill-forward so each segment has a stable value
+        let last = null;
+        for (let i = 0; i < bucketsLen; i++) {
+          if (buckets[i] != null && !isNaN(buckets[i])) {
+            last = buckets[i];
+          } else if (last != null) {
+            buckets[i] = last;
+          }
+        }
+
+        // Fill-backward for early hours without data
+        let next = null;
+        for (let i = bucketsLen - 1; i >= 0; i--) {
+          if (buckets[i] != null && !isNaN(buckets[i])) {
+            next = buckets[i];
+          } else if (next != null) {
+            buckets[i] = next;
+          }
+        }
+
+        // For today (dayOffset=0), null out future hours
+        if (dayOffset === 0) {
+          for (let i = nowIndex + 1; i < bucketsLen; i++) {
+            buckets[i] = null;
+          }
+          // If no data at all, use current state as baseline for past hours
+          const hasAny = buckets.some((v, idx) => idx <= nowIndex && v != null && !isNaN(v));
+          if (!hasAny && stateObj) {
+            const cur = Number(stateObj.state);
+            if (!isNaN(cur)) {
+              for (let i = 0; i <= nowIndex; i++) {
+                buckets[i] = cur;
+              }
+            }
+          }
+        }
+
+        this._historyCache[cacheKey] = {
+          loading: false,
+          fetchedAt: Date.now(),
+          values: buckets,
+        };
+        this._render();
+      })
+      .catch((e) => {
+        this._historyCache[cacheKey] = {
+          loading: false,
+          fetchedAt: Date.now(),
+          values: existing?.values || [],
+          error: e,
+        };
+        this._render();
+      });
+  } catch (e) {
+    this._historyCache[cacheKey] = {
+      loading: false,
+      fetchedAt: Date.now(),
+      values: existing?.values || [],
+      error: e,
+    };
+  }
+
+  return this._historyCache[cacheKey]?.values || [];
+}
+
 
       // ------------------------------------------------------
       // RENDER
@@ -1165,10 +1310,45 @@ _getYesterday24ForLayer(lc, hass) {
 
 _buildLayerData(cfg, hass) {
   const layers = [];
-  (cfg.layers || []).forEach((lc, index) => {
+
+  // Pre-expand: multi-day layers become N entries (one per day), single-day layers pass through.
+  // Each entry in expandedList has { lc, expandedIndex, _dayOffset, _isMultiDay, _totalDays, _originalLayerIdx }.
+  const expandedList = [];
+  (cfg.layers || []).forEach((lc, origIdx) => {
+    const isHistLayer = lc.price_source === "history" || lc.type === "history" || lc.type === "consumption";
+    const numDays = isHistLayer && lc.days != null && Number(lc.days) > 1
+      ? Math.max(1, Math.min(7, Math.floor(Number(lc.days))))
+      : 1;
+
+    if (numDays > 1) {
+      // Multi-day: outer ring (today) first, then older days inward
+      for (let d = 0; d < numDays; d++) {
+        expandedList.push({
+          lc,
+          _dayOffset: d,
+          _isMultiDay: true,
+          _totalDays: numDays,
+          _originalLayerIdx: origIdx,
+        });
+      }
+    } else {
+      expandedList.push({
+        lc,
+        _dayOffset: 0,
+        _isMultiDay: false,
+        _totalDays: 1,
+        _originalLayerIdx: origIdx,
+      });
+    }
+  });
+
+  // Build layer data using expanded index for radius calculation
+  expandedList.forEach((entry, expandedIndex) => {
+    const { lc, _dayOffset, _isMultiDay, _totalDays, _originalLayerIdx } = entry;
+
     const baseRadius =
       (lc.radius != null ? lc.radius : cfg.radius) -
-      index * ((lc.thickness || 6) + (cfg.layer_gap || 2));
+      expandedIndex * ((lc.thickness || 6) + (cfg.layer_gap || 2));
     const thickness = lc.thickness || 6;
     const rOuter = baseRadius;
     const rInner = baseRadius - thickness;
@@ -1176,45 +1356,62 @@ _buildLayerData(cfg, hass) {
     const stateObj = getEntityState(hass, lc.entity);
     if (!stateObj) return;
 
-    // ---- Hämta råvärden för lagret ----
-    let values = this._resolveLayerValues(lc, hass, stateObj);
-    if (!values || !values.length) return;
+    const isHistoryLayer =
+      lc.price_source === "history" || lc.type === "history" || lc.type === "consumption";
 
-    // If the value source is a plain array (e.g. attribute array) it won't have __todayOnly.
-    // Create it so gradient range stays consistent between 24h and 12h views.
-    if (values && Array.isArray(values) && !values.__todayOnly && values.length >= 24 && values.length % 24 === 0) {
-      try { values.__todayOnly = values.slice(); } catch (e) {}
-    }
+    // --- Fetch values ---
+    let values;
 
-    //v1.0.4
-    // Preserve meta from history arrays (used for keep+fade and stable gradient range)
-    const __prevMaskFull = values && values.__prevMask ? values.__prevMask : null;
-    const __todayOnlyFull = values && values.__todayOnly ? values.__todayOnly : null;
-    const __yestBucketsFull = values && values.__yestBuckets ? values.__yestBuckets : null;
+    if (_isMultiDay) {
+      // Multi-day mode: fetch each day independently via _getHistoryForDay
+      values = this._getHistoryForDay(lc, hass, stateObj, _dayOffset);
 
-    // Slice to current half-day in 12h mode so geometry stays correct.
-    if ((cfg.clock_mode || "24h") === "12h") {
-      values = sliceValuesForClockMode(values, cfg);
+      // For multi-day, skip this ring if no data at all (leave visual gap)
+      if (!values || !values.length) return;
 
-      if (__prevMaskFull && Array.isArray(__prevMaskFull) && __prevMaskFull.length) {
-        const m2 = sliceValuesForClockMode(__prevMaskFull, cfg);
-        try { values.__prevMask = m2; } catch(e) {}
+      // Slice for 12h mode
+      if ((cfg.clock_mode || "24h") === "12h") {
+        values = sliceValuesForClockMode(values, cfg);
       }
-      if (__todayOnlyFull && Array.isArray(__todayOnlyFull) && __todayOnlyFull.length) {
-        const t2 = sliceValuesForClockMode(__todayOnlyFull, cfg);
-        try { values.__todayOnly = t2; } catch(e) {}
-      }
-      if (__yestBucketsFull && Array.isArray(__yestBucketsFull) && __yestBucketsFull.length) {
-        const y2 = sliceValuesForClockMode(__yestBucketsFull, cfg);
-        try { values.__yestBuckets = y2; } catch(e) {}
-      }
+      if (!values || !values.length) return;
     } else {
-      // 24h mode: keep full day buckets
-      try { if (__prevMaskFull) values.__prevMask = __prevMaskFull; } catch(e) {}
-      try { if (__todayOnlyFull) values.__todayOnly = __todayOnlyFull; } catch(e) {}
-      try { if (__yestBucketsFull) values.__yestBuckets = __yestBucketsFull; } catch(e) {}
+      // Single-day: existing logic unchanged
+      values = this._resolveLayerValues(lc, hass, stateObj);
+      if (!values || !values.length) return;
+
+      // If the value source is a plain array it won't have __todayOnly.
+      if (values && Array.isArray(values) && !values.__todayOnly && values.length >= 24 && values.length % 24 === 0) {
+        try { values.__todayOnly = values.slice(); } catch (e) {}
+      }
+
+      // Preserve meta from history arrays
+      const __prevMaskFull = values && values.__prevMask ? values.__prevMask : null;
+      const __todayOnlyFull = values && values.__todayOnly ? values.__todayOnly : null;
+      const __yestBucketsFull = values && values.__yestBuckets ? values.__yestBuckets : null;
+
+      // Slice to current half-day in 12h mode
+      if ((cfg.clock_mode || "24h") === "12h") {
+        values = sliceValuesForClockMode(values, cfg);
+
+        if (__prevMaskFull && Array.isArray(__prevMaskFull) && __prevMaskFull.length) {
+          const m2 = sliceValuesForClockMode(__prevMaskFull, cfg);
+          try { values.__prevMask = m2; } catch(e) {}
+        }
+        if (__todayOnlyFull && Array.isArray(__todayOnlyFull) && __todayOnlyFull.length) {
+          const t2 = sliceValuesForClockMode(__todayOnlyFull, cfg);
+          try { values.__todayOnly = t2; } catch(e) {}
+        }
+        if (__yestBucketsFull && Array.isArray(__yestBucketsFull) && __yestBucketsFull.length) {
+          const y2 = sliceValuesForClockMode(__yestBucketsFull, cfg);
+          try { values.__yestBuckets = y2; } catch(e) {}
+        }
+      } else {
+        try { if (__prevMaskFull) values.__prevMask = __prevMaskFull; } catch(e) {}
+        try { if (__todayOnlyFull) values.__todayOnly = __todayOnlyFull; } catch(e) {}
+        try { if (__yestBucketsFull) values.__yestBuckets = __yestBucketsFull; } catch(e) {}
+      }
+      if (!values || !values.length) return;
     }
-if (!values || !values.length) return;
 
     const unit =
       stateObj.attributes.unit_of_measurement ||
@@ -1229,7 +1426,7 @@ if (!values || !values.length) return;
     let minIndex = -1;
     let maxIndex = -1;
 
-    const statsValues = (values && values.__todayOnly && Array.isArray(values.__todayOnly) && values.__todayOnly.length)
+    const statsValues = (!_isMultiDay && values && values.__todayOnly && Array.isArray(values.__todayOnly) && values.__todayOnly.length)
       ? values.__todayOnly
       : values;
 
@@ -1263,74 +1460,67 @@ if (!values || !values.length) return;
         }
       });
     }
-    // Separate gradient range for previous-day values (so turning on Keep doesn't recolor today's segments)
+
+    // Separate gradient range for previous-day values (single-day keep mode only)
     let prevMin = null;
     let prevMax = null;
-    const __yb = values && values.__yestBuckets && Array.isArray(values.__yestBuckets) ? values.__yestBuckets : null;
-    if (__yb && __yb.length) {
-      __yb.forEach((v) => {
-        if (v == null) return;
-        const num = Number(v);
-        if (isNaN(num)) return;
-        if (prevMin == null || num < prevMin) prevMin = num;
-        if (prevMax == null || num > prevMax) prevMax = num;
-      });
+    if (!_isMultiDay) {
+      const __yb = values && values.__yestBuckets && Array.isArray(values.__yestBuckets) ? values.__yestBuckets : null;
+      if (__yb && __yb.length) {
+        __yb.forEach((v) => {
+          if (v == null) return;
+          const num = Number(v);
+          if (isNaN(num)) return;
+          if (prevMin == null || num < prevMin) prevMin = num;
+          if (prevMax == null || num > prevMax) prevMax = num;
+        });
+      }
     }
 
-
-    const isHistoryLayer =
-      lc.price_source === "history" || lc.type === "history" || lc.type === "consumption";
-
-    // Segment count:
-    // - For history/consumption layers we derive it from the computed values array,
-    //   which may be 24*N (or 12*N in 12h mode) when segment_count is used to split each hour.
-    // - For other layers we keep the legacy behaviour: lc.segment_count can directly control how
-    //   many segments that layer uses.
+    // Segment count
     const segmentCount = isHistoryLayer
       ? (values?.length || 0)
       : (lc.segment_count && Number(lc.segment_count) > 0 ? Number(lc.segment_count) : (values?.length || 0));
 
+    // --- Keep across midnight overlay (single-day mode only, multi-day ignores this) ---
+    let overlayValues = null;
+    let overlayMask = null;
+    let overlayMin = null;
+    let overlayMax = null;
 
-// --- Keep across midnight overlay (ONLY for history-based layers) ---
-let overlayValues = null;
-let overlayMask = null;
-let overlayMin = null;
-let overlayMax = null;
+    if (!_isMultiDay && isHistoryLayer && lc.keep_across_midnight === true) {
+      const y24 = this._getYesterday24ForLayer(lc, hass);
+      if (Array.isArray(y24) && y24.length >= 24 && y24.length % 24 === 0) {
+        const nowHour = getSystemHour();
+        const yView = (cfg.clock_mode || "24h") === "12h"
+          ? sliceValuesForClockMode(y24, cfg)
+          : y24.slice();
 
-if (isHistoryLayer && lc.keep_across_midnight === true) {
-  const y24 = this._getYesterday24ForLayer(lc, hass);
-  if (Array.isArray(y24) && y24.length >= 24 && y24.length % 24 === 0) {
-    const nowHour = getSystemHour(); // 0..23
-    const yView = (cfg.clock_mode || "24h") === "12h"
-      ? sliceValuesForClockMode(y24, cfg)
-      : y24.slice();
+        const nView = values.length;
+        overlayValues = new Array(nView).fill(null);
+        overlayMask = new Array(nView).fill(false);
 
-    // Build overlay only for future buckets (so today's part is NEVER affected)
-    const nView = values.length;
-    overlayValues = new Array(nView).fill(null);
-    overlayMask = new Array(nView).fill(false);
+        const viewHours = (cfg.clock_mode || "24h") === "12h" ? 12 : 24;
+        const itemsPerHour = Math.max(1, Math.floor(nView / viewHours));
 
-    const viewHours = (cfg.clock_mode || "24h") === "12h" ? 12 : 24;
-    const itemsPerHour = Math.max(1, Math.floor(nView / viewHours));
-
-    for (let i = 0; i < nView; i++) {
-      let bucketHour = Math.floor(i / itemsPerHour);
-      if ((cfg.clock_mode || "24h") === "12h") {
-        const offset = nowHour >= 12 ? 12 : 0;
-        bucketHour = offset + bucketHour;
-      }
-      if (bucketHour > nowHour) {
-        const v = yView[i];
-        if (v != null && !isNaN(Number(v))) {
-          overlayValues[i] = Number(v);
-          overlayMask[i] = true;
-          if (overlayMin === null || overlayValues[i] < overlayMin) overlayMin = overlayValues[i];
-          if (overlayMax === null || overlayValues[i] > overlayMax) overlayMax = overlayValues[i];
+        for (let i = 0; i < nView; i++) {
+          let bucketHour = Math.floor(i / itemsPerHour);
+          if ((cfg.clock_mode || "24h") === "12h") {
+            const offset = nowHour >= 12 ? 12 : 0;
+            bucketHour = offset + bucketHour;
+          }
+          if (bucketHour > nowHour) {
+            const v = yView[i];
+            if (v != null && !isNaN(Number(v))) {
+              overlayValues[i] = Number(v);
+              overlayMask[i] = true;
+              if (overlayMin === null || overlayValues[i] < overlayMin) overlayMin = overlayValues[i];
+              if (overlayMax === null || overlayValues[i] > overlayMax) overlayMax = overlayValues[i];
+            }
+          }
         }
       }
     }
-  }
-}
 
     layers.push({
       cfg: lc,
@@ -1351,8 +1541,37 @@ if (isHistoryLayer && lc.keep_across_midnight === true) {
       rOuter,
       unit,
       segmentCount,
+      // Multi-day metadata
+      dayIndex: _dayOffset,
+      dayCount: _totalDays,
+      _isMultiDay,
+      _originalLayerIdx,
     });
   });
+
+  // Second pass: for multi-day groups, share min/max across all days so color scale is consistent
+  const multiDayGroups = {};
+  layers.forEach((layer) => {
+    if (layer._isMultiDay) {
+      const key = layer._originalLayerIdx;
+      if (!multiDayGroups[key]) multiDayGroups[key] = [];
+      multiDayGroups[key].push(layer);
+    }
+  });
+  Object.values(multiDayGroups).forEach((group) => {
+    let groupMin = null;
+    let groupMax = null;
+    group.forEach((layer) => {
+      if (layer.min != null && (groupMin === null || layer.min < groupMin)) groupMin = layer.min;
+      if (layer.max != null && (groupMax === null || layer.max > groupMax)) groupMax = layer.max;
+    });
+    // Apply shared min/max to all day-rings in the group
+    group.forEach((layer) => {
+      layer.min = groupMin;
+      layer.max = groupMax;
+    });
+  });
+
   return layers;
 }
 
@@ -1723,14 +1942,22 @@ _getClockGeometryLabels(cfg) {
 
               const baseOpacity = lc.opacity != null ? lc.opacity : 1.0;
 
-              // Fade "previous day" segments when keeping across midnight.
-              // Works for both 24h (values[0..23]) and 12h (values[0..11] == AM/PM window).
+              // Fade "previous day" segments when keeping across midnight (single-day mode).
               let opacity = baseOpacity;
               if (lc.keep_across_midnight === true && lc.fade_previous_day === true) {
                 if (__isPrev) {
                   const fRaw = Number(lc.fade_previous_day_opacity ?? 0.25);
                   const fade = isNaN(fRaw) ? 0.25 : Math.max(0, Math.min(1, fRaw));
                   opacity = baseOpacity * fade;
+                }
+              }
+
+              // Multi-day fade: progressively reduce opacity for older days
+              if (layer._isMultiDay && layer.dayIndex > 0) {
+                const dayFade = lc.day_fade !== false; // default true
+                if (dayFade) {
+                  const fadeStep = lc.day_fade_step != null ? Math.max(0, Math.min(1, Number(lc.day_fade_step))) : 0.25;
+                  opacity = opacity * Math.max(0, 1 - layer.dayIndex * fadeStep);
                 }
               }
 
@@ -1786,67 +2013,78 @@ _getClockGeometryLabels(cfg) {
         }
 
         // Stats badges (min / max / avg)
+        // For multi-day rings, only show markers on today's ring (dayIndex === 0)
         const markersCfg = lc.stats_markers || {};
         let markersSvg = "";
-        const markerColor = markersCfg.color || "rgba(255,255,255,0.9)";
-        const decimals =
-          markersCfg.decimals !== undefined && markersCfg.decimals !== null
-            ? Number(markersCfg.decimals)
-            : 1;
+        const showMarkers = !(layer._isMultiDay && layer.dayIndex > 0);
 
-        const radiusOffset = markersCfg.radius_offset;
-        const fontSize = markersCfg.font_size;
-        const minLabel = markersCfg.min_label ?? "";
-        const maxLabel = markersCfg.max_label ?? "";
-        const avgLabel = markersCfg.avg_label ?? "";
+        if (showMarkers) {
+          const markerColor = markersCfg.color || "rgba(255,255,255,0.9)";
+          const decimals =
+            markersCfg.decimals !== undefined && markersCfg.decimals !== null
+              ? Number(markersCfg.decimals)
+              : 1;
 
-        if (markersCfg.show_min && minIndex >= 0 && min != null) {
-          markersSvg += this._renderStatsMarker(
-            cfg,
-            layer,
-            minIndex,
-            min,
-            unit,
-            "min",
-            markerColor,
-            decimals,
-            radiusOffset,
-            fontSize,
-            minLabel
-          );
-        }
-        if (markersCfg.show_max && maxIndex >= 0 && max != null) {
-          markersSvg += this._renderStatsMarker(
-            cfg,
-            layer,
-            maxIndex,
-            max,
-            unit,
-            "max",
-            markerColor,
-            decimals,
-            radiusOffset,
-            fontSize,
-            maxLabel
-          );
-        }
-        if (markersCfg.show_avg && avgIndex >= 0 && avg != null) {
-          markersSvg += this._renderStatsMarker(
-            cfg,
-            layer,
-            avgIndex,
-            avg,
-            unit,
-            "avg",
-            markerColor,
-            decimals,
-            radiusOffset,
-            fontSize,
-            avgLabel
-          );
+          const radiusOffset = markersCfg.radius_offset;
+          const fontSize = markersCfg.font_size;
+          const minLabel = markersCfg.min_label ?? "";
+          const maxLabel = markersCfg.max_label ?? "";
+          const avgLabel = markersCfg.avg_label ?? "";
+
+          if (markersCfg.show_min && minIndex >= 0 && min != null) {
+            markersSvg += this._renderStatsMarker(
+              cfg,
+              layer,
+              minIndex,
+              min,
+              unit,
+              "min",
+              markerColor,
+              decimals,
+              radiusOffset,
+              fontSize,
+              minLabel
+            );
+          }
+          if (markersCfg.show_max && maxIndex >= 0 && max != null) {
+            markersSvg += this._renderStatsMarker(
+              cfg,
+              layer,
+              maxIndex,
+              max,
+              unit,
+              "max",
+              markerColor,
+              decimals,
+              radiusOffset,
+              fontSize,
+              maxLabel
+            );
+          }
+          if (markersCfg.show_avg && avgIndex >= 0 && avg != null) {
+            markersSvg += this._renderStatsMarker(
+              cfg,
+              layer,
+              avgIndex,
+              avg,
+              unit,
+              "avg",
+              markerColor,
+              decimals,
+              radiusOffset,
+              fontSize,
+              avgLabel
+            );
+          }
         }
 
-        return segs + markersSvg;
+        // Day labels for multi-day rings
+        let dayLabelSvg = "";
+        if (layer._isMultiDay && layer.dayCount > 1 && lc.day_labels === true) {
+          dayLabelSvg = this._renderDayLabel(cfg, layer);
+        }
+
+        return segs + markersSvg + dayLabelSvg;
       }
 
       
@@ -1925,6 +2163,57 @@ _getClockGeometryLabels(cfg) {
           >
             ${textStr}
           </text>
+        `;
+      }
+
+      // Render a day label for multi-day ring layers
+      _renderDayLabel(cfg, layer) {
+        const lc = layer.cfg;
+        const dayIndex = layer.dayIndex;
+        const format = lc.day_label_format || "relative";
+        const position = lc.day_label_position || "right";
+        const fontSize = lc.day_label_font_size != null ? Number(lc.day_label_font_size) : 3;
+        const color = lc.day_label_color || "rgba(255,255,255,0.7)";
+
+        // Build label text
+        let labelText = "";
+        if (format === "date") {
+          const d = new Date();
+          d.setDate(d.getDate() - dayIndex);
+          labelText = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+        } else {
+          // "relative" format
+          if (dayIndex === 0) labelText = "Today";
+          else if (dayIndex === 1) labelText = "Yesterday";
+          else labelText = `${dayIndex}d ago`;
+        }
+
+        // Position angle based on label position
+        let angle;
+        switch (position) {
+          case "left": angle = 270; break;
+          case "top": angle = 0; break;
+          case "bottom": angle = 180; break;
+          case "right":
+          default: angle = 90; break;
+        }
+
+        // Place at the midpoint of the ring
+        const rMid = (layer.rInner + layer.rOuter) / 2;
+        const p = polarToCartesian(rMid, angle);
+
+        return `
+          <text
+            x="${p.x}"
+            y="${p.y}"
+            text-anchor="middle"
+            alignment-baseline="middle"
+            font-size="${fontSize}"
+            fill="${color}"
+            stroke="rgba(0,0,0,0.65)"
+            stroke-width="0.8"
+            paint-order="stroke fill"
+          >${labelText}</text>
         `;
       }
 
@@ -3593,22 +3882,26 @@ _renderHourLabelsSvg(cfg, r) {
 
                   ${(layer.price_source === "history" || layer.type === "consumption" || layer.type === "history")
                     ? html`
-                        <div class="row-inline">
-                          <ha-select
-                            label="History day"
-                            .value=${String(layer.day_offset ?? 0)}
-                            @selected=${(e) =>
-                              this._updateLayer(
-                                idx,
-                                "day_offset",
-                                Number(e.target.value || 0)
-                              )}
-                            @closed=${this._stopPropagation}
-                          >
-                            <mwc-list-item value="0">Today</mwc-list-item>
-                            <mwc-list-item value="1">Yesterday</mwc-list-item>
-                          </ha-select>
-                        </div>
+                        ${Number(layer.days || 1) <= 1
+                          ? html`
+                            <div class="row-inline">
+                              <ha-select
+                                label="History day"
+                                .value=${String(layer.day_offset ?? 0)}
+                                @selected=${(e) =>
+                                  this._updateLayer(
+                                    idx,
+                                    "day_offset",
+                                    Number(e.target.value || 0)
+                                  )}
+                                @closed=${this._stopPropagation}
+                              >
+                                <mwc-list-item value="0">Today</mwc-list-item>
+                                <mwc-list-item value="1">Yesterday</mwc-list-item>
+                              </ha-select>
+                            </div>
+                          `
+                          : html``}
                       `
                     : html``}
 
@@ -3617,13 +3910,135 @@ _renderHourLabelsSvg(cfg, r) {
                     (e.g. <code>today</code> for Nordpool).
                     Value path: property inside each array item (e.g. <code>value</code>).
                   </div>
-                  
-                  
+
                   ${(
                     layer.price_source === "history" ||
                     layer.type === "consumption" ||
                     layer.type === "history"
                   )
+                    ? html`
+                        <div class="small" style="margin-top:8px; font-weight:600;">Multi-day comparison</div>
+                        <div class="row-inline">
+                          <ha-textfield
+                            type="number"
+                            min="1"
+                            max="7"
+                            step="1"
+                            label="Days (1-7)"
+                            .value=${layer.days ?? 1}
+                            @input=${(e) =>
+                              this._updateLayer(
+                                idx,
+                                "days",
+                                e.target.value === "" ? 1 : Math.max(1, Math.min(7, Math.floor(Number(e.target.value))))
+                              )}
+                          ></ha-textfield>
+                        </div>
+                        <div class="small">
+                          Set to more than 1 to show multiple concentric rings (one per day).
+                          Outer ring = today, inner rings = older days.
+                        </div>
+
+                        ${Number(layer.days || 1) > 1
+                          ? html`
+                              <div class="row-inline" style="margin-top:4px;">
+                                <ha-switch
+                                  .checked=${layer.day_fade !== false}
+                                  @change=${(e) =>
+                                    this._updateLayer(
+                                      idx,
+                                      "day_fade",
+                                      e.target.checked
+                                    )}
+                                ></ha-switch>
+                                <span class="small">Fade older day rings</span>
+                              </div>
+
+                              ${layer.day_fade !== false
+                                ? html`
+                                    <div class="row-inline">
+                                      <ha-textfield
+                                        type="number"
+                                        step="0.05"
+                                        min="0"
+                                        max="1"
+                                        label="Fade step per day (0-1)"
+                                        .value=${layer.day_fade_step ?? 0.25}
+                                        @input=${(e) =>
+                                          this._updateLayer(
+                                            idx,
+                                            "day_fade_step",
+                                            Number(e.target.value)
+                                          )}
+                                      ></ha-textfield>
+                                    </div>
+                                  `
+                                : html``}
+
+                              <div class="row-inline" style="margin-top:4px;">
+                                <ha-switch
+                                  .checked=${layer.day_labels === true}
+                                  @change=${(e) =>
+                                    this._updateLayer(
+                                      idx,
+                                      "day_labels",
+                                      e.target.checked
+                                    )}
+                                ></ha-switch>
+                                <span class="small">Show day labels on rings</span>
+                              </div>
+
+                              ${layer.day_labels === true
+                                ? html`
+                                    <div class="row-inline">
+                                      <ha-select
+                                        label="Label format"
+                                        .value=${layer.day_label_format || "relative"}
+                                        @selected=${(e) =>
+                                          this._updateLayer(
+                                            idx,
+                                            "day_label_format",
+                                            e.target.value || "relative"
+                                          )}
+                                        @closed=${this._stopPropagation}
+                                      >
+                                        <mwc-list-item value="relative">Relative (Today, Yesterday, 2d ago)</mwc-list-item>
+                                        <mwc-list-item value="date">Date (Jan 15)</mwc-list-item>
+                                      </ha-select>
+                                      <ha-select
+                                        label="Label position"
+                                        .value=${layer.day_label_position || "right"}
+                                        @selected=${(e) =>
+                                          this._updateLayer(
+                                            idx,
+                                            "day_label_position",
+                                            e.target.value || "right"
+                                          )}
+                                        @closed=${this._stopPropagation}
+                                      >
+                                        <mwc-list-item value="right">Right</mwc-list-item>
+                                        <mwc-list-item value="left">Left</mwc-list-item>
+                                        <mwc-list-item value="top">Top</mwc-list-item>
+                                        <mwc-list-item value="bottom">Bottom</mwc-list-item>
+                                      </ha-select>
+                                    </div>
+                                  `
+                                : html``}
+
+                              <div class="small" style="margin-top:4px; color: var(--warning-color, #ff9800);">
+                                NOTE: "History day" and "Keep values across midnight" are
+                                not available when using multi-day mode.
+                              </div>
+                            `
+                          : html``}
+                      `
+                    : html``}
+
+                  ${(
+                    layer.price_source === "history" ||
+                    layer.type === "consumption" ||
+                    layer.type === "history"
+                  ) && Number(layer.days || 1) <= 1
                     ? html`
                         <div class="row-inline" style="margin-top:4px;">
                           <ha-switch
@@ -3663,7 +4078,7 @@ _renderHourLabelsSvg(cfg, r) {
                                         step="0.01"
                                         min="0"
                                         max="1"
-                                        label="Previous-day opacity (0–1)"
+                                        label="Previous-day opacity (0-1)"
                                         .value=${layer.fade_previous_day_opacity ?? 0.25}
                                         @input=${(e) =>
                                           this._updateLayer(
