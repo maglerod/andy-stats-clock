@@ -73,6 +73,33 @@ The card will:
 4. Only show valid data (no fake futures)
 5. Cache results and avoid overloading HA
 
+✔ Multi-day history rings
+
+Display up to 7 days of history as concentric rings for any history or consumption layer:
+* `days: 1–7` — number of days to show (1 = today only, 7 = full week)
+* Older days render as outer rings, today is always the innermost ring
+* `day_fade` / `day_fade_step` — gradually reduce opacity on older rings
+* `day_labels` — show day-of-week labels beside each ring
+* `day_label_format` — label style: `short` (Mon), `narrow` (M), or `full` (Monday)
+* `day_label_position` — place labels on `left` or `right` side
+* Min/max scaling is shared across all day-rings for consistent comparison
+* Stats markers (min/max/avg) appear on today's ring only
+
+```yaml
+layers:
+  - id: temp_week
+    type: history
+    entity: sensor.outdoor_temperature
+    days: 7
+    day_fade: true
+    day_fade_step: 0.12
+    day_labels: true
+    day_label_format: short
+    day_label_position: left
+```
+
+Note: Multi-day mode is mutually exclusive with `keep_across_midnight` and `day_offset`.
+
 ✔ CenterWatch (Center display)
 
 Add multiple center elements such as:
