@@ -90,12 +90,12 @@ layers:
   - id: temp_week
     type: history
     entity: sensor.outdoor_temperature
-    days: 7
+    days: 3
     day_fade: true
     day_fade_step: 0.12
     day_labels: true
     day_label_format: short
-    day_label_position: left
+    day_label_position: top
 ```
 
 Note: Multi-day mode is mutually exclusive with `keep_across_midnight` and `day_offset`.
