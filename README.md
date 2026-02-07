@@ -85,6 +85,8 @@ Display up to 7 days of history as concentric rings for any history or consumpti
 * Min/max scaling is shared across all day-rings for consistent comparison
 * Stats markers (min/max/avg) appear on today's ring only
 
+<img width="300" height="316" alt="Screenshot 2026-02-07 at 10 12 55" src="https://github.com/user-attachments/assets/7b55502e-6ee8-4ffd-8174-80e880b6b1e7" />
+
 ```yaml
 layers:
   - id: temp_week
